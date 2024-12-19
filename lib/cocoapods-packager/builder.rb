@@ -144,10 +144,10 @@ module Pod
       static_libs = static_libs_in_sandbox('build') + static_libs_in_sandbox('build-sim') + vendored_libraries
       libs = ios_architectures.map do |arch|
         library = "#{@static_sandbox_root}/build/package-#{arch}.a"
-        `libtool -arch_only #{arch} -static -o #{library} #{static_libs.join(' ')}`
-        library
-      end
-
+        `libtool -arch_only #{arch} -static -o #{library} #{static_libs.join(' ')} 2> /dev/null`
+        library if File.exist?(library)
+      end.compact
+    
       `lipo -create -output #{output} #{libs.join(' ')}`
     end
 
@@ -198,13 +198,14 @@ module Pod
       Dir.glob("#{headers_source_root}/**/*.h").
         each { |h| `ditto #{h} #{@fwk.headers_path}/#{h.sub(headers_source_root, '')}` }
 
+      module_map = nil
       # If custom 'module_map' is specified add it to the framework distribution
       # otherwise check if a header exists that is equal to 'spec.name', if so
       # create a default 'module_map' one using it.
-      if !@spec.module_map.nil?
+      if @spec.module_map
         module_map_file = @file_accessors.flat_map(&:module_map).first
         module_map = File.read(module_map_file) if Pathname(module_map_file).exist?
-      elsif File.exist?("#{@public_headers_root}/#{@spec.name}/#{@spec.name}.h")
+      elsif @spec.module_map.nil? && File.exist?("#{@public_headers_root}/#{@spec.name}/#{@spec.name}.h")
         module_map = <<MAP
 framework module #{@spec.name} {
   umbrella header "#{@spec.name}.h"
@@ -277,16 +278,20 @@ MAP
 
     def vendored_libraries
       if @vendored_libraries
-        @vendored_libraries
+        return @vendored_libraries
       end
       file_accessors = if @exclude_deps
+                         puts "Excluding dependencies"
                          @file_accessors
                        else
+                         puts "Including dependencies"
                          @static_installer.pod_targets.flat_map(&:file_accessors)
                        end
       libs = file_accessors.flat_map(&:vendored_static_frameworks).map { |f| f + f.basename('.*') } || []
       libs += file_accessors.flat_map(&:vendored_static_libraries)
       @vendored_libraries = libs.compact.map(&:to_s)
+      puts "Vendored libraries: #{@vendored_libraries}"
+    
       @vendored_libraries
     end
 
@@ -300,14 +305,32 @@ MAP
     end
 
     def ios_build_options
-      "ARCHS=\'#{ios_architectures.join(' ')}\' OTHER_CFLAGS=\'-fembed-bitcode -Qunused-arguments\'"
+      "ARCHS=\'$(ARCHS_STANDARD)\' OTHER_CFLAGS=\'-fembed-bitcode -Qunused-arguments\'"
     end
 
     def ios_architectures
-      archs = %w(x86_64 i386 arm64 armv7 armv7s)
-      vendored_libraries.each do |library|
-        archs = `lipo -info #{library}`.split & archs
+      xcode_version_string = `xcodebuild -version`.strip.split()[1]
+      xcode_version = Pod::Version.new(xcode_version_string)
+      UI.puts "current xcode version: #{xcode_version}"
+      archs = if xcode_version >= Pod::Version.new('14.0')
+        # i386 & armv7/armv7s has been deprecated in Xcode14
+        %w(x86_64 arm64 arm64e)
+      elsif xcode_version < Pod::Version.new('10.0')
+        %w(x86_64 i386 arm64 armv7 armv7s)
+      else
+        %w(x86_64 i386 arm64 arm64e armv7 armv7s)
       end
+      UI.puts "Initial architectures: #{archs}"
+      
+      vendored_libraries.each do |library|
+        library_archs = `lipo -info #{library}`.split
+        UI.puts "Architectures for #{library}: #{library_archs}"
+        
+        archs = library_archs & archs
+        UI.puts "Intersected architectures: #{archs}"
+      end
+      
+      UI.puts "Final architectures: #{archs}"
       archs
     end
 

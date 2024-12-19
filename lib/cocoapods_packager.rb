@@ -1,5 +1,5 @@
 module Pod
   module Packager
-    VERSION = '1.5.0'.freeze
+    VERSION = '2.0.1'.freeze
   end
 end
